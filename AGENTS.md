@@ -52,26 +52,27 @@ python3 targets.py                        # 只生成候选 worklist.jsonl，不
 ### Seedream 实时目录投放操作规则
 
 - Seedream 产品地址固定为 `https://seedream-5.site/`。
-- 所有表单、注册和验证邮件统一使用 `support@seedream-5.site`，姓名统一使用 `Yan Tao`。
-- 不得使用 Gmail，也不得在任何表单填写 `yantao006@agent.qq.com`。
+- 注册和登录流程不得停滞，也不得就同一个 OAuth 或邮箱选择重复询问操作员。
+- 注册和登录方式固定按邮箱、Google、GitHub 的顺序尝试。
+- 登录和注册邮箱统一使用 `yantao006@agent.qq.com`（agent.qq.com），并通过现有 QQ sweeper 路径收信。
+- 收录表单中的公开产品或联系字段仍使用 `support@seedream-5.site`，姓名使用 `Yan Tao`；如果字段明确用于账号登录邮箱，则改用 agent.qq.com 邮箱。
+- 绝不使用 Gmail。
+- 邮箱注册或登录不可用或无法继续时，Google 登录已获持续授权；Google 无法完成时改用 GitHub。使用 Ego Default/Tao profile 中已登录的会话，绝不输入密码。
+- 仅在遇到验证码、缺少可用的 Google/GitHub 登录会话或密码字段时交接一次，并明确说明操作员缺少的具体动作；同一请求不得重复提出。
+- 非登录类软性阻碍，包括互链或徽章要求、联盟要求和质量门槛，仍按可选与必需规则处理。
 - 实时目录投放只能使用 `ego-browser` 驱动 Ego。
 - 实时投放不得使用 Chrome、Chromium、Playwright 或 `chrome-devtools-axi`，旧 `driver.py` 和 `agent_submit.mjs` 仅供代码维护和离线测试参考。
 - 目标目录只收录导航、论坛、博客和 paid 类站点。
 - 忽略站长目录（webmaster directories）以及自然获得的引用和媒体报道（organic/media citations）。
 - 每个站点最多执行一次真实 POST。
 - 真实 POST 发出后绝不自动重试，`delivery_ambiguous` 永远只由人工裁决。
-- 新建任何目录账号前，操作员必须明确点名授权该具体站点。
-- 已有安全保存凭据的站点可以登录。
-- 软性或可选阻碍必须由操作员判断，绝不能自动判定为失败。
-- 软性或可选阻碍包括仅支持 Google、GitHub 或其他 OAuth 的登录，互链或徽章要求，联盟或质量门槛，以及验证码、数学题或 Turnstile。
-- 遇到软性或可选阻碍时，把当前实时 Ego 任务空间交给操作员，说明页面要求与可选方案，然后等待。
+- 非登录类软性或可选阻碍必须由操作员判断，绝不能自动判定为失败。
+- 遇到非登录类软性或可选阻碍时，把当前实时 Ego 任务空间交给操作员，说明页面要求与可选方案，然后等待。
 - 只要仍有可选方案，就不得把站点记为 `failed`，也不得以不可行为由跳过。
 - 只有遇到硬性必需死路，或操作员明确拒绝所有仍可行的选项后，才能记录 `failed`。
 - 硬性必需死路仅包括确认没有提交入口、确认重复且站点已接受过提交（例如 HTTP 409）、或确认站点宕机。
 - `mail_sweeper.py --loop` 必须与实时投放者运行在同一个隔离 worktree 中。
 - 当 AgentMail 没有来信时，QQ 路径是实时收信路径。
-- 代理绝不能输入密码，需输入密码时必须把任务交给操作员。
-- 代理绝不能自行完成 Google 或 GitHub OAuth。
 - 代理绝不能虚构第二个产品邮箱。
 
 **改 `outreach/` 任何代码，前后都跑 `bash outreach/tests/smoke.sh`**（语法 + Python 关键路径
