@@ -5,7 +5,7 @@
     "url": "https://your-product.com/",
     "og_image": "https://your-product.com/og.png",
     "submitter": {
-      "_说明": "受控身份:站方注册账号用的名字和邮箱。email 必须是你能收信的地址(与 my_site.json 的 IMAP 信箱同一个),验证码/验证信会发到这",
+      "_说明": "受控身份:站方注册账号用的名字和邮箱。email 必须是你能收信的地址；可以是受控转发别名，只要最终进入 mail_sweeper 读取的信箱。验证码/验证信会发到这里",
       "name": "Your Name",
       "email": "you@yourmail.com"
     },

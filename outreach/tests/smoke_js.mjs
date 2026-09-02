@@ -178,6 +178,120 @@ await t('rootDomain(PSL)', () => { if (rd.rootDomain('a.b.example.co.uk') !== 'e
 const cs = await import('../capsolver.mjs');
 await t('capsolver.hasKey', () => cs.hasKey());
 
+// ── 新目录注册逐站审批硬闸 ──
+// 直接导入生产 actImpl,用内存 page double 验证:未批准时不触碰 signup DOM、不写 creds,
+// 同时必须入 human_tasks 并落 blocked/needs_registration_approval。
+const fsReg = await import('node:fs');
+const regKit = `${D}/registration-kit.json`;
+const regCreds = `${D}/registration-creds.json`;
+fsReg.writeFileSync(regKit, JSON.stringify({
+  product: {
+    name: 'Test Product', url: 'https://product.example/', og_image: '',
+    submitter: { name: 'Test Owner', email: 'support@product.example' },
+    categories: ['Tools'], tags: ['test'],
+  },
+  copy: {
+    taglines: ['Test product', 'Test product'],
+    descriptions: { xs_50: ['Test'], s_150: ['Test product'], m_300: ['Test product'], l_510: ['Test product'] },
+  },
+  compliance: { forbidden_claims_regex: ['never-match-this-fixture'] },
+}));
+process.env.OUTREACH_CREDS = regCreds;
+process.argv.push('--kit', regKit);
+const submitAgent = await import('../agent_submit.mjs');
+
+await t('未批准 register/signup/OAuth/fork 硬停且零 creds', async () => {
+  let signupSubmits = 0;
+  const untouchedPage = new Proxy({}, {
+    get() { return async () => { signupSubmits++; throw new Error('未批准路径触碰了 signup page'); }; },
+  });
+  const assertStopped = async (dom, action, pg = untouchedPage) => {
+    let stopped = false;
+    try { await submitAgent.actImpl(pg, action, dom); }
+    catch (e) { stopped = Boolean(e && e.registrationApprovalRequired); }
+    if (!stopped) throw new Error(`${dom} 未以 needs_registration_approval 停止`);
+    const cur = db.currentStatus(dom);
+    if (!cur || cur.status !== 'blocked' || !/needs_registration_approval/.test(JSON.stringify(cur))) {
+      throw new Error(`${dom} 没有 blocked/needs_registration_approval 终局`);
+    }
+    if (!db.pendingHumanTasks().some(x => x.domain === dom && x.blocker === 'needs_registration_approval')) {
+      throw new Error(`${dom} 没进入注册审批人工队列`);
+    }
+  };
+  for (const [dom, action] of [
+    ['new-register.example', { action: 'register', reason: 'signup required' }],
+    ['new-fork.example', { action: 'fork_account', reason: 'one account per product' }],
+    ['new-signup.example', { action: 'click', target: 'Sign up' }],
+    ['new-oauth.example', { action: 'click', target: 'Continue with Google' }],
+  ]) await assertStopped(dom, action);
+
+  // LLM 常输出不带语义的 b0。代码必须从真实按钮/表单识别 signup,不能只匹配 target 文案。
+  let opaqueClicks = 0;
+  const signupForm = {
+    innerText: 'Create your account',
+    querySelector: (q) => q.includes('password') || q.includes('email') ? {} : null,
+  };
+  const opaqueButton = {
+    isVisible: async () => true,
+    getAttribute: async () => '',
+    click: async () => { opaqueClicks++; },
+    evaluate: async (fn) => fn({
+      innerText: 'Continue', value: '',
+      getAttribute: () => '', closest: () => signupForm,
+    }),
+  };
+  const opaquePage = { $$: async () => [opaqueButton] };
+  await assertStopped('new-opaque-signup.example', { action: 'click', target: 'b0' }, opaquePage);
+  if (opaqueClicks) throw new Error('不透明 b0 signup 按钮被提交');
+  if (signupSubmits) throw new Error(`未批准路径触碰 signup page ${signupSubmits} 次`);
+  if (fsReg.existsSync(regCreds)) throw new Error('未批准注册竟创建了 creds.json');
+});
+
+await t('stored creds 只允许明确 Login,不改凭据', async () => {
+  const original = JSON.stringify({
+    'existing.example': { user: 'owner', email: 'owner@example.com', pass: 'existing-test-password' },
+  }, null, 2);
+  fsReg.writeFileSync(regCreds, original);
+  const filled = [];
+  let clicked = 0;
+  const input = (type, name) => ({
+    getAttribute: async (key) => key === 'type' ? type : key === 'name' ? name : '',
+    fill: async (value) => { filled.push([type, value]); },
+  });
+  const pg = {
+    $: async () => ({ click: async () => { clicked++; } }),
+    $$: async () => [input('email', 'email'), input('password', 'password')],
+    waitForTimeout: async () => {},
+  };
+  const out = await submitAgent.actImpl(pg, { action: 'login' }, 'existing.example');
+  if (!/stored creds/.test(out) || clicked !== 1 || filled.length !== 2) {
+    throw new Error('已有凭据没有走明确 login');
+  }
+  if (fsReg.readFileSync(regCreds, 'utf8') !== original) throw new Error('login 改写了已有 creds');
+});
+
+await t('批准必须精确到站,批准站才可 register', async () => {
+  process.argv.push('--approve-registration', 'approved.example');
+  let clicked = 0;
+  const input = (type, name) => ({
+    getAttribute: async (key) => key === 'type' ? type : key === 'name' ? name : '',
+    fill: async () => {},
+  });
+  const pg = {
+    $$: async () => [input('email', 'email'), input('password', 'password')],
+    $: async () => ({ click: async () => { clicked++; } }),
+    waitForTimeout: async () => {},
+  };
+  try {
+    await submitAgent.actImpl(pg, { action: 'register' }, 'approved.example');
+    if (clicked !== 1) throw new Error('精确批准站未提交 signup');
+    const creds = JSON.parse(fsReg.readFileSync(regCreds, 'utf8'));
+    if (!creds['approved.example'] || !creds['approved.example'].pass) throw new Error('精确批准站未保存凭据');
+  } finally {
+    process.argv.splice(-2, 2);
+  }
+});
+
 const bad = res.filter((r) => !r[0]);
 for (const [good, name, err] of res) if (!good) console.log(`   ❌ ${name} → ${err}`);
 console.log(`   ${res.length - bad.length}/${res.length} 通过${bad.length ? '' : ' ✅'}`);

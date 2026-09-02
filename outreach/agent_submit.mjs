@@ -191,10 +191,9 @@ function advisoryNote() {
   // 【2026-07-30】CDP 受控浏览器模式:浏览器里有用户登录好的 Google 小号。
   // 不告诉 LLM 这件事,它看见 OAuth 墙就直接判 blocked(goodaitools 实证)。
   if (process.argv.includes('--cdp')) {
-    extra.push('- 当前是受控真实浏览器,**已登录 Google 账号**。遇到 Google OAuth/'
-      + 'Continue with Google/Sign in with Google 的注册或登录墙时,**直接点该按钮**完成授权,'
-      + '不要判 blocked。已登录时授权页通常自动跳过;若出现账号选择/同意页,选那个已登录的'
-      + ' Gmail 账号并同意。授权完成跳回站点后继续正常提交流程。');
+    extra.push('- 当前是受控真实浏览器。Google/OAuth 授权可能创建站点新账号,也属于新注册。'
+      + '没有该站逐站批准时禁止点击 OAuth/Continue with Google/Sign up,必须停止并请求批准。'
+      + '已有 creds.json 邮箱密码的站只走 Sign in/Login,不要改走 OAuth。');
   }
   if (!advisory || !advisory.length) return extra.length ? '\n\n【运行环境提示】\n' + extra.join('\n') : '';
   const lines = advisory.map(c => {
@@ -229,15 +228,14 @@ const VALUES = {
   desc_short: KIT.copy.descriptions.s_150[0], desc_mid: KIT.copy.descriptions.m_300[0],
   desc_long: KIT.copy.descriptions.l_510[0], tags: KIT.product.tags.join(', '),
   categories: KIT.product.categories.join(', '), logo: KIT.product.og_image,
-  // 收验证码/验证信的受控邮箱:env AGENT_EMAIL > kit submitter.email。
-  // 必须与 mail_sweeper.py 读的 AgentMail 信箱(agently-cli)是同一个,否则 email_otp 永远等不到信。
+  // 收验证码/验证信的受控表单邮箱:env AGENT_EMAIL > kit submitter.email。
+  // 地址可以是受控转发别名,只要最终进入 mail_sweeper.py 通过 agently-cli 读取的 QQ 信箱。
   agent_email: process.env.AGENT_EMAIL || (KIT.product.submitter && KIT.product.submitter.email) || '',
 };
 // 【08-01 用户定·反检测】身份轮换:每个域固定抽一个 persona(同域稳定、跨域轮换),
 // 破 Akismet 跨站签名(几百个站同一名字+邮箱 = 全网亮红灯)。
-// 【08-02 二修】persona 邮箱一律用 gmail 中性域:邮箱域=被推广域是 Akismet 最重的
-// 指纹之一(等于自报家门)。这些地址不受我们控制,仅用于评论/联系表单(这些流程不回信);
-// 需要收验证码的注册流程走 kit submitter.email / agent_email(受控邮箱),不受影响。
+// persona 必须使用真实、受控且与本产品政策一致的地址。目录表单也会读取这里的 email;
+// 需要收验证码的注册流程始终走 kit submitter.email / agent_email。
 // 覆盖:env IDENTITY_FORCE="Name|email@x" 或 "Name|email@x|https://author-url/"
 // (第三段可选:覆盖评论作者网址,用于主域/Substack/Blogspot 三落点轮换)。
 try {
@@ -300,13 +298,10 @@ function domainPassword(dom, accountEmail) {
 function forkAccountForProduct(dom, reason) {
   // 产品专属账号必须配**产品自己的**邮箱,否则站方看到的还是同一个地址,
   // 一账号一产品的限制根本没绕过(Codex 2026-07-26 [P1])。
-  // 这个地址来自 kit 的 submitter.email(如 contact@<产品域>,转发进你的 AgentMail 信箱),
-  // 天然按产品不同(见 creds.mjs 的账号键策略注释)。
+  // 这个地址来自 kit 的 submitter.email,可以经 Email Routing 转发到 sweeper 读取的 QQ 信箱。
   const productEmail = (KIT.product.submitter && KIT.product.submitter.email) || '';
-  if (!productEmail || productEmail === VALUES.agent_email) {
-    console.log(`[${dom}] ⚠️ 无法单开账号:kit 的 submitter.email `
-      + `(${productEmail || '空'})与注册身份相同或缺失,站方仍会判为已有账号。`
-      + `请给该产品配 contact@<产品域> 并做好邮件转发`);
+  if (!productEmail) {
+    console.log(`[${dom}] ⚠️ 无法单开账号:kit 的 submitter.email 为空,请先配置受控收信地址`);
     return null;
   }
   // 身份迁移(产品联系邮箱成为共享注册身份)后,共享账号邮箱
@@ -415,6 +410,74 @@ function queueForHuman(dom, blocker, guidance, retry = {}) {
     }
     return false;
   }
+}
+
+// 新目录注册必须是命令行上的逐站显式授权。故意不提供全局布尔开关或持久环境变量,
+// 避免上一任务的宽授权泄漏到下一任务。可重复传:
+//   --approve-registration exact-directory.example
+function registrationApproved(dom, argv = process.argv) {
+  let wanted;
+  try { wanted = dbw.canonDomain(dom); } catch { return false; }
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== '--approve-registration' || !argv[i + 1]) continue;
+    try {
+      if (dbw.canonDomain(argv[i + 1]) === wanted) return true;
+    } catch { /* 非法批准值按未批准处理,fail closed */ }
+  }
+  return false;
+}
+
+/** 只认已经完整保存的邮箱/密码账号。pass:null 的 fork 占位不是可登录账号。 */
+function storedCredentials(dom) {
+  const key = credsFile.accountKey(dom, PSLUG);
+  const row = credsFile.get(key);
+  if (!row || !row.pass || !(row.email || row.user)) return null;
+  return { key, email: String(row.email || ''), user: String(row.user || ''), pass: String(row.pass) };
+}
+
+/**
+ * 未批准新注册的唯一终端:先入人工任务,再写 blocked + reason_code,最后抛出让主循环停站。
+ * 绝不能在调用本函数之前生成密码、写 creds 或触碰 signup/OAuth DOM。
+ */
+function registrationApprovalStop(dom, detail) {
+  const why = String(detail || '站点需要创建新目录账号').slice(0, 220);
+  const queued = queueForHuman(dom, 'needs_registration_approval',
+    `目录站 ${dom} 需要创建新账号(${why})。请 captain 单独审核该精确站点;批准后仅在该次命令传 `
+    + `--approve-registration ${dom}。批准前不要填写/提交 signup,不要点击 Google/OAuth,不要写新 creds。`);
+  const r = upsert(dom, 'blocked', `needs_registration_approval:${why}`,
+    '新目录注册未获逐站批准,已停止且未触碰 signup',
+    { reason_code: 'needs_registration_approval' });
+  const e = new Error(`NEEDS_REGISTRATION_APPROVAL ${dom}: ${why}`);
+  e.registrationApprovalRequired = true;
+  e.queued = queued;
+  e.stateWritten = Boolean(r && (r.written || r.to === 'blocked'));
+  throw e;
+}
+
+function registrationIntentFromText(value) {
+  const t = String(value || '').trim();
+  return /(?:\bsign[-_\s]*up\b|\bcreate\s+(?:(?:an?|your|new)\s+)?account\b|\bjoin\s+(?:now|free)\b|\bregister\s+(?:account|now|free)\b|\bregister\b\s*$|\b(?:continue|sign\s*in|log\s*in)\s+with\s+(?:google|x|twitter|github|microsoft|apple)\b|\bgoogle\s*(?:oauth|account)\b|(?:^|[/?#=&_.-])(?:sign[-_]?up|register|create[-_]?account|oauth|auth\/(?:google|twitter|github|microsoft|apple))(?:[/?#=&_.-]|$)|注册(?:账号)?|创建账号|谷歌(?:授权|登录))/i.test(t);
+}
+
+/** 同时看按钮、href 与最近表单,拦住 target=b0 这类没有语义的 LLM 点击。 */
+async function registrationIntentFromElement(el, target) {
+  if (registrationIntentFromText(target)) return true;
+  try {
+    const meta = await el.evaluate((node) => {
+      const form = node.closest && node.closest('form');
+      return {
+        text: `${node.innerText || node.value || ''} ${node.getAttribute?.('aria-label') || ''}`,
+        href: node.getAttribute?.('href') || '',
+        formText: form ? (form.innerText || '').slice(0, 600) : '',
+        accountForm: Boolean(form && form.querySelector('input[type=password]')
+          && form.querySelector('input[type=email],input[name*=mail i],input[name*=user i]')),
+      };
+    });
+    const combined = `${meta.text || ''} ${meta.href || ''}`;
+    if (registrationIntentFromText(combined)) return true;
+    return Boolean(meta.accountForm
+      && /sign\s*up|register|create\s+(?:(?:an?|your|new)\s+)?account|注册|创建账号/i.test(meta.formText || ''));
+  } catch { return false; }
 }
 
 /** 只在真实终端仍为 ambiguous 时入队；writer 会在 delivered 升级时自动关闭。 */
@@ -771,7 +834,7 @@ async function revealForm(pg) {
   return `点了「${clicked}」,控件 ${before}→${after}`;
 }
 
-async function actImpl(pg, a, dom) {
+export async function actImpl(pg, a, dom) {
   switch (a.action) {
     case 'reveal_form':
       return await revealForm(pg);
@@ -846,6 +909,11 @@ async function actImpl(pg, a, dom) {
       return `已填 ${a.target}${preview}${cap ? `(cap=${cap},实填 ${v.length} 字${fitNote})` : ''}`;
     }
     case 'click': {
+      // Sign up/Register/OAuth 都可能创建新账号。LLM prompt 只是第一道提示,
+      // 这里在任何 DOM 点击前做代码硬闸,防止模型用通用 click 绕过 register 动作。
+      if (registrationIntentFromText(a.target) && !registrationApproved(dom)) {
+        registrationApprovalStop(dom, `未批准的新账号入口点击:${String(a.target || '').slice(0, 80)}`);
+      }
       const el = await locate(pg, a.target, true);
       if (!el) {
         // 【2026-07-30】text= 兜底:Google 账号选择器这类行不是 button/input,
@@ -858,6 +926,9 @@ async function actImpl(pg, a, dom) {
           // 别让 Locator.evaluate 干等 30s 默认超时。
           const textEl = pg.locator(`text=${JSON.stringify(String(a.target))}`).first();
           if (await textEl.count() === 0) return actionResult(`点失败:找不到 ${a.target}`);
+          if (await registrationIntentFromElement(textEl, a.target) && !registrationApproved(dom)) {
+            registrationApprovalStop(dom, `未批准的新账号入口点击:${String(a.target || '').slice(0, 80)}`);
+          }
           const textSubmit = await isSubmitClassClick(textEl, a.target);
           if (textSubmit && !claimDelivery(dom, `text 兜底点击 ${a.target}`)) {
             return actionResult(`已有投递认领/投达终局,text 兜底不重复点提交类文案 ${a.target} → 交观察流判定`, true, false);
@@ -869,6 +940,9 @@ async function actImpl(pg, a, dom) {
           if (e && e.ledger) throw e;
           return actionResult(`点失败:找不到 ${a.target}`);
         }
+      }
+      if (await registrationIntentFromElement(el, a.target) && !registrationApproved(dom)) {
+        registrationApprovalStop(dom, `未批准的新账号入口点击:${String(a.target || '').slice(0, 80)}`);
       }
       if (pg._recaptchaToken) {
         const inCaptchaForm = await el.evaluate(e => {
@@ -1213,34 +1287,55 @@ async function actImpl(pg, a, dom) {
     case 'wait':
       await pg.waitForTimeout(4000);
       return '已等 4s';
+    case 'login': {
+      // 已存账号只允许走明确的 Sign in/Login 控件。不要用通用 submit 按钮兜底,
+      // 否则模型在 signup 页误调 login 时仍可能把已有密码提交给注册端点。
+      const account = storedCredentials(dom);
+      if (!account) registrationApprovalStop(dom, '登录墙无 stored creds,禁止自动创建账号');
+      const btn = await pg.$([
+        'button:has-text("Sign in"):visible', 'button:has-text("Log in"):visible',
+        'button:has-text("Login"):visible', 'button:has-text("登录"):visible',
+        'input[type=submit][value*="sign in" i]:visible',
+        'input[type=submit][value*="log in" i]:visible',
+      ].join(', '));
+      if (!btn) return '登录停止:当前页面没有明确 Sign in/Login 控件,禁止把凭据填进疑似 signup 表单';
+      let filled = 0;
+      for (const el of await pg.$$('input:visible')) {
+        const type = String((await el.getAttribute('type')) || 'text').toLowerCase();
+        const name = String((await el.getAttribute('name'))
+          || (await el.getAttribute('placeholder')) || '').toLowerCase();
+        if (type === 'email') { await el.fill(account.email); filled++; }
+        else if (type === 'password') { await el.fill(account.pass); filled++; }
+        else if (/^(username|user|login)/.test(name)) { await el.fill(account.user || account.email); filled++; }
+      }
+      if (!filled) return '登录停止:明确登录页里没找到邮箱/用户名/密码字段';
+      await btn.click();
+      await pg.waitForTimeout(4000);
+      return `已用 stored creds 登录(字段${filled}个)`;
+    }
     case 'fork_account': {
-      // 站方限制一账号一产品:给本产品单开账号,并记 365 天约束,下次直接走专属账号。
-      // 不短路整站 —— 换个账号照样能投。
+      // fork_account 会创建一个产品专属账号记录,本质仍是新目录注册。
+      // 没有本次命令对该站的精确批准时,必须在写 creds 前停止。
+      if (!registrationApproved(dom)) {
+        registrationApprovalStop(dom, a.reason || '站方要求为新产品另开账号');
+      }
       const forked = forkAccountForProduct(dom, a.reason || '站方提示需为新产品另开账号');
       return forked
-        ? '已为本产品单开账号(新邮箱),请继续走注册流程'
-        : '无法单开账号:本产品没有独立联系邮箱,站方会判为已有账号 —— 请 giveup 并归因 needs_product_email';
+        ? '已为本产品准备专属账号记录,请继续获批的注册流程'
+        : '无法单开账号:本产品没有独立联系邮箱,请 giveup 并归因 needs_product_email';
     }
     case 'register': {
-      // 邮箱注册:填**该账号的**邮箱 + 站点专属密码(creds.json 持久化)。
-      // 单开过账号的站要用产品专属地址,否则站方看到同一个邮箱就判"已存在"
-      // (Codex 2026-07-26 [P1])。
-      // 注册身份:优先用**产品自己的**联系邮箱(contact@<产品域>)。
-      // CF Email Routing 把它转发到 agent 信箱,所以 emailOtp 照样读得到验证码,
-      // 而站方看到的是一个产品一个身份 —— 顺带让 fork_account 天然成立。
-      // (plus 寻址并非所有邮箱服务商都支持,别依赖它)
-      // ⚠️ 顺序要紧:必须**先**算出该用哪个邮箱,再去建账号记录。
-      // 反过来写的话,建记录时写进去的默认地址会被下一行原样读回来,回落永不生效。
-      // 已有账号的站在这里读到的是它当初注册用的地址 —— 那个不能改,
-      // 改了等于用一个站方不认识的邮箱去登录已有账号。
+      // register 只能在 captain 对本次命令里的精确站点授权后执行。
+      // 闸必须位于 accountEmail/domainPassword 之前,否则即使不点提交也会先把新密码写进 creds。
+      if (!registrationApproved(dom)) {
+        registrationApprovalStop(dom, a.reason || '站点需要创建新目录账号');
+      }
       const regEmail = credsFile.accountEmail(dom, PSLUG,
         (KIT.product.submitter && KIT.product.submitter.email) || VALUES.agent_email);
       const pass = domainPassword(dom, regEmail);
       let filled = 0;
       for (const el of await pg.$$('input:visible')) {
         const type = (await el.getAttribute('type')) || 'text';
-        // 【修】原写法 `a || '' + b || ''`:+ 比 || 紧,实际是 a || ('' + b) || '',
-        // 两个属性都缺时得到字面量字符串 "null",末尾的 || '' 是死代码。
         const name = String((await el.getAttribute('name'))
           || (await el.getAttribute('placeholder')) || '').toLowerCase();
         if (type === 'email') { await el.fill(regEmail); filled++; }
@@ -1249,7 +1344,7 @@ async function actImpl(pg, a, dom) {
       }
       const btn = await pg.$('button[type=submit]:visible, button:has-text("Register"):visible, button:has-text("Sign up"):visible, button:has-text("注册"):visible');
       if (btn) { await btn.click().catch(() => {}); await pg.waitForTimeout(4000); }
-      return `注册表单已填提交(字段${filled}个,邮箱 ${regEmail})`;
+      return `已按逐站批准创建账号(字段${filled}个,邮箱 ${regEmail})`;
     }
     case 'email_otp': {
       // 【2026-07-30】站方已回「账号已存在」时,验证信永远不会来 —— 账号早已注册
@@ -1736,19 +1831,19 @@ ${stories || '(无)'}
 const SYSTEM = `你是目录站提交代理,目标:把产品 ${PNAME} 提交进当前网站。${process.env.RESCUE_CONTEXT ? `
 【救援模式(08-06 用户令)】该站上轮投放失败,败因:${process.env.RESCUE_CONTEXT}
 你的任务不是重复上轮动作,而是:①先判断败因属于哪类(找错页/要注册/验证码/付费墙/JS表单未渲染/类目不符);
-②找能成功的路径——换提交入口(/submit、/add、页脚链接、注册后提交)、register 注册、email_otp 收码、
-等 JS 渲染后再找表单;③确认无路可走才 giveup,归因要比上轮更精确。` : ''}
+②找能成功的已授权路径——换提交入口(/submit、/add、页脚链接)、用 stored creds 登录、
+等 JS 渲染后再找表单;③遇到未批准的新注册就停止请求批准,其余确认无路才 giveup。` : ''}
 可用值(填表时只能选这些槽位,或基于它们组合,禁止引入未证实的声称如 AI/best/guaranteed):
 name=${VALUES.name} / url=${VALUES.url} / email=${VALUES.email} / submitter=${VALUES.submitter}
 tagline=${VALUES.tagline}
 desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(逗号标签)/ categories / logo=${VALUES.logo}
-每一步输出 JSON:{"action":"fill_many|fill|click|select|upload|scroll|wait|math|captcha_turnstile|captcha_recaptcha|cf_challenge|register|fork_account|email_otp|reveal_form|done|giveup",
+每一步输出 JSON:{"action":"fill_many|fill|click|select|upload|scroll|wait|math|captcha_turnstile|captcha_recaptcha|cf_challenge|login|register|fork_account|email_otp|reveal_form|done|giveup",
  "target":"观察里的序号(按钮 b0/输入 i0/下拉 s0)或按钮文本", "value":"槽位名或组合值", "reason":"一句话"}
 规则:
 - 付费墙/必须付款 → {"action":"done","result":"skipped_paid","reason":"价格"}
-- **站方限制「一个账号只能提交一个产品」时**(如提示已有产品、需为新产品另开账号):
-  用 fork_account 动作,系统会给本产品单开账号并记住;**不要**用别的产品的账号硬提交。
-- **遇到登录墙:优先注册而不是放弃**——先点 Register/Sign up/注册 链接,然后 register 动作(自动填 agent 邮箱+站点密码);注册后如需邮箱验证,用 email_otp 动作(自动从 agent 邮箱取验证码/点验证链接);仅当无法注册(仅 Google/X OAuth、注册页有验证码、无注册入口)才 {"action":"done","result":"blocked","reason":"仅 OAuth/注册有验证码"}
+- **新目录账号逐站审批**:register、fork_account、Sign up/Register/Create account、Google/OAuth 都可能创建新账号。只有本次命令明确批准当前精确域名时才允许;否则代码会入 human_tasks 并落 blocked/needs_registration_approval。
+- **遇到登录墙**:只在本站已有 stored creds 时进入 Sign in/Login 页面并用 login 动作。没有 stored creds → 立即停止请求批准;禁止点击 Sign up/Register/Create account,禁止用 Google/OAuth 顺手建号。
+- **站方限制「一个账号只能提交一个产品」时**:不要自动 fork_account。没有逐站批准就停止请求批准;有批准时才能 fork,且不得拿别的产品账号硬提交。
 - 提交成功 → {"action":"done","result":"success"或"pending_review","reason":"页面证据"}
 - **成功判据(严格)**:只有页面出现明确提交确认文案(已收到/进入审核/已收录),才算 success/pending_review;**仅注册/登录/OTP 验证/账号创建成功都不算提交成功**;统计/分析/广告/验证码类接口的 200 响应与提交无关,禁止当证据
 - ⭐**填表一次填完,别一步一个字段**:看清整个表单后用
@@ -1785,7 +1880,7 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
 - **JS 渲染表单(08-06 排期)**:滚到底仍无控件时,先 reveal_form(自动找「写评论/Comment/Reply」触发器点击挂载)再判死;
   一次 reveal 没出控件可再换一个触发器,两次仍无才 giveup` + cvBlock();
 
-(async () => {
+export async function main() {
   const target = process.argv[2];
   // 【08-08 实证】主循环内的预算检查挡不住「单个 await 挂死」(page.goto/evaluate
   // 不返回时循环永远不转,legrand-jp/winebooks 挂 54-65 分钟实证)。
@@ -2308,9 +2403,12 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
               && !pagesAtStart.has(p)
               && /accounts\.google\.com|oauth/i.test(p.url()));
             if (gp) {
-              // 【2026-07-30】机械点选优先于 LLM:账号行的 DOM 不是 button/input,
-              // LLM+locator 连点 5 次全空(goodaitools 实证)。直接按 @gmail 文本点,
-              // 事件冒泡天然触发行容器。授权页(允许/继续)同样机械点。
+              // OAuth 弹窗可能在首次授权时创建站点账号。即使受控 Chrome 已登录 Google,
+              // 没有本次命令对精确站点的批准也不能机械点账号行或同意按钮。
+              if (!registrationApproved(dom)) {
+                await gp.close().catch(() => {});
+                registrationApprovalStop(dom, '检测到 Google/OAuth 新账号授权弹窗');
+              }
               const clicked = await gp.evaluate(() => {
                 const els = [...document.querySelectorAll('div,li,span,a')]
                   .filter(e => /@gmail\.com/.test(e.textContent || '') && (e.textContent || '').length < 100);
@@ -2436,7 +2534,7 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
               console.log(`[${dom}] S${step}b(换路) ${h.action} ${h.target || ''} → ${r2.text}`);
               if (!/失败|未找到|找不到/.test(r2.text)) failStreak = 0;   // 换路成功就清零,别接着连跪
             }
-          } catch (he) { if (he && (he.infra || he.budget || he.ledger)) throw he; }   // 基建/预算/写账错误不许吞(P1-新2/十二轮 P2-4)
+          } catch (he) { if (he && (he.infra || he.budget || he.ledger || he.registrationApprovalRequired)) throw he; }   // 基建/预算/写账/注册审批硬停不许吞
         }
       } else failStreak = 0;
       // ---- 页面没动 = 没进展(2026-07-27 加)----
@@ -2506,7 +2604,7 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
             log.push(`S${step}b(视觉):${h.action} ${h.target || ''}→${r2.text}`);
             console.log(`[${dom}] S${step}b(视觉) ${h.action} ${h.target || ''} → ${r2.text}`);
           }
-        } catch (he) { if (he && (he.infra || he.budget || he.ledger)) throw he; }   // 基建/预算/写账错误不许吞(P1-新2/十二轮 P2-4)
+        } catch (he) { if (he && (he.infra || he.budget || he.ledger || he.registrationApprovalRequired)) throw he; }   // 基建/预算/写账/注册审批硬停不许吞
         sameStreak = 0;
       }
       await pg.screenshot({ path: `/tmp/agent_${dom}_s${step}.png` }).catch(() => {});
@@ -2607,6 +2705,12 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
           + `(否则该域被永久排除却无人处理),域留池,exit 43`);
         process.exitCode = process.exitCode || 43;
       }
+    } else if (e && e.registrationApprovalRequired) {
+      // human task 与 blocked/needs_registration_approval 已在触碰 signup/OAuth 前落好。
+      // 这里不再补写普通 blocked,也不继续 LLM 步循环。
+      console.log(`[${dom}] 新目录注册未获逐站批准 → blocked/needs_registration_approval`
+        + `${e.queued ? '(已入人工队列)' : '(人工队列写入失败,请检查 human_tasks)'}`);
+      if (!e.queued) process.exitCode = process.exitCode || 43;
     } else if (e && e.budget) {
       // 日预算熔断:写事件(reason_code=budget_exceeded,此前定义了没人用),不写
       // submissions 行(域留池),exit 42 通知驱动停波 —— 不然后面每个带验证码的域
@@ -2652,7 +2756,11 @@ desc_short / desc_mid / desc_long(三种长度描述,按字段要求选)/ tags(�
     await closeCdpTabs().catch(() => {});
     await browser.close().catch(() => {});
   }
-})().catch(e => {
+}
+
+const IS_DIRECT_RUN = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (IS_DIRECT_RUN) main().catch(e => {
   // 【08-11 九轮评审 P1-2】LEDGER_WRITE_FAILED 逃到顶层也要 exit 43(消息含标记,
   // 驱动按文本兜底识别),其余未捕获故障照旧 exit 1
   console.error('FATAL', e.message);
