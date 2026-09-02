@@ -3,7 +3,7 @@
 **v1.0.0**（变更见 [CHANGELOG.md](CHANGELOG.md)）。把这个项目丢给 AI 时，读这个文件就够了。
 
 两块东西：`index.html` + `data/` 是数据站（成熟，直接用）；`outreach/` 是外链投放管道
-（代码经 8 轮外审，但**尚未端到端真跑过**，首次务必 `--limit 5` 小批验证）。
+（代码经 8 轮外审，但**尚未端到端真跑过**；任何真实目录投放都只能在 Ego 中逐站执行，首次先验证 5 个目标）。
 
 ## 跑起来（唯一需要做的事）
 
@@ -38,16 +38,41 @@ cd <本目录> && python3 -m http.server 8899
 
 ## outreach/（外链投放工具）
 
-用户看完数据要投放时用这个（LLM-in-the-loop 管道，详见 outreach/README.md）：
+用户看完数据要投放时用这个（管道细节详见 `outreach/README.md`，但其中旧浏览器和实时投放命令不适用于真实投放，以下规则优先）：
 
 ```bash
-cd outreach && npm install   # playwright-core;另需本机 Chrome 或 npx playwright install chromium
+cd outreach && npm install   # 仅安装旧工具与离线测试依赖；真实目录投放不得使用 Playwright/Chrome
 python3 configure.py                     # LLM 端点 + 打码/收信 key(本机界面,带实测按钮)
 python3 check_llm.py                     # 或纯命令行验端点(连通性 + json_object)
 cp kit.example.json kit.json             # 产品资料包(填表槽位/forbidden_claims 红线)
 cp identities.example.json identities.json  # persona 池
-python3 targets.py && python3 driver.py --limit 5
+python3 targets.py                        # 只生成候选 worklist.jsonl，不会提交
 ```
+
+### Seedream 实时目录投放操作规则
+
+- Seedream 产品地址固定为 `https://seedream-5.site/`。
+- 所有表单、注册和验证邮件统一使用 `support@seedream-5.site`，姓名统一使用 `Yan Tao`。
+- 不得使用 Gmail，也不得在任何表单填写 `yantao006@agent.qq.com`。
+- 实时目录投放只能使用 `ego-browser` 驱动 Ego。
+- 实时投放不得使用 Chrome、Chromium、Playwright 或 `chrome-devtools-axi`，旧 `driver.py` 和 `agent_submit.mjs` 仅供代码维护和离线测试参考。
+- 目标目录只收录导航、论坛、博客和 paid 类站点。
+- 忽略站长目录（webmaster directories）以及自然获得的引用和媒体报道（organic/media citations）。
+- 每个站点最多执行一次真实 POST。
+- 真实 POST 发出后绝不自动重试，`delivery_ambiguous` 永远只由人工裁决。
+- 新建任何目录账号前，操作员必须明确点名授权该具体站点。
+- 已有安全保存凭据的站点可以登录。
+- 软性或可选阻碍必须由操作员判断，绝不能自动判定为失败。
+- 软性或可选阻碍包括仅支持 Google、GitHub 或其他 OAuth 的登录，互链或徽章要求，联盟或质量门槛，以及验证码、数学题或 Turnstile。
+- 遇到软性或可选阻碍时，把当前实时 Ego 任务空间交给操作员，说明页面要求与可选方案，然后等待。
+- 只要仍有可选方案，就不得把站点记为 `failed`，也不得以不可行为由跳过。
+- 只有遇到硬性必需死路，或操作员明确拒绝所有仍可行的选项后，才能记录 `failed`。
+- 硬性必需死路仅包括确认没有提交入口、确认重复且站点已接受过提交（例如 HTTP 409）、或确认站点宕机。
+- `mail_sweeper.py --loop` 必须与实时投放者运行在同一个隔离 worktree 中。
+- 当 AgentMail 没有来信时，QQ 路径是实时收信路径。
+- 代理绝不能输入密码，需输入密码时必须把任务交给操作员。
+- 代理绝不能自行完成 Google 或 GitHub OAuth。
+- 代理绝不能虚构第二个产品邮箱。
 
 **改 `outreach/` 任何代码，前后都跑 `bash outreach/tests/smoke.sh`**（语法 + Python 关键路径
 29 项 + Node 关键路径 47 项 + 配置 py/js 对拍 43 组 + 12 进程并发认领）。
@@ -66,7 +91,7 @@ persona 身份池（identities.json）、产品资料包（kit.json）。
 mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读文件头移植说明。
 
 - kit.json / identities.json / my_site.json 全是占位模板，必须替换成用户真实信息，别用示例值投
-- 先 `driver.py --limit 5` 小批验证，没问题再放量；state.jsonl 是唯一状态源，别手改
+- 实时投放先在 Ego 中逐站验证 5 个目标，没问题再放量；不得用 `driver.py` 或 `agent_submit.mjs` 对真实站点投放；state.jsonl 是唯一状态源，别手改
 - **写账本只能走 `state.upsert_submission` / `state.mjs upsertSubmission`**，不许直接
   往 state.jsonl 追加行：迁移守卫（投达态不许被打回 blocked/failed）就在那里，绕过去
   = 把已投达的域重新放回可重投池 = 重复提交。driver.py 的 `save_state()` 已收口到守卫，
@@ -79,7 +104,7 @@ mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读�
   （启动时打一行日志说明）——想让单站跑更久，得先把 driver 的 `timeout=900` 一起抬
 - 提交后验证邮件由 `mail_sweeper.py --loop` 自动处理（agently-cli 收信+LLM 判意图+点验证链接，
   四条安全闸别动）；先 `--dry-run` 演一遍再放--loop
-- 验证码站没配 capsolver_key 会标 manual 进 human_tasks.jsonl，人工处理，不要尝试自动过码
+- 旧运行时代码在未配置 capsolver_key 时会把验证码站标 `manual`；这不是实时 Ego 投放规则，实时任务必须交给操作员并等待，不要自动过码
 - delivery_ambiguous = 提交可能已投达但终局未定，永不自动重投，只能人工裁决
 - pending_review ≠ 上线：终核器 `verify_link.mjs --pending --update-status` 确认在线且
   dofollow 才抬 success（offline_confirmed 连续 ≥3 次才写 failed——单次核验不判死，
@@ -103,3 +128,10 @@ mail_sweeper.py 是生产文件逐字复制的最小改动移植，改它先读�
 ## 免责声明
 
 流量/排名/反链数据为第三方服务估算值，仅研究参考，别当精确值引用。
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
